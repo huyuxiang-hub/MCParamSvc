@@ -1,0 +1,251 @@
+Index: src/MCParamsFileSvc.cc
+===================================================================
+--- src/MCParamsFileSvc.cc	(revision 4713)
++++ src/MCParamsFileSvc.cc	(working copy)
+@@ -15,7 +15,7 @@
+ MCParamsFileSvc::MCParamsFileSvc(const std::string& name)
+     : SvcBase(name)
+ {
+-
++  declProp("ReplaceParam",m_Param2value);
+ }
+ 
+ MCParamsFileSvc::~MCParamsFileSvc()
+@@ -40,14 +40,16 @@
+ 
+ bool
+ MCParamsFileSvc::Get(const std::string& param, vec_d2d& props)
+-{
+-    return get_implv1(param, props);
++{  
++     const std::string path = GetPath( param );
++    return get_implv1(path, props); 
+ }
+ 
+ bool
+ MCParamsFileSvc::Get(const std::string& param, vec_s2d& props)
+ {
+-    return get_implv1(param, props);
++    const std::string path = GetPath( param );
++    return get_implv1(path, props);
+ }
+ 
+ bool
+@@ -56,11 +58,114 @@
+     // convert tuple to map
+     bool st;
+     vec_s2d vec_props;
+-    st = get_implv1(param, vec_props);
++
++    const std::string path = GetPath( param );
++    st = get_implv1(path, vec_props);
+     for (vec_s2d::iterator it = vec_props.begin();
+             it != vec_props.end(); ++it) {
+-        props[it->get<0>()] = it->get<1>();
++        std::string  property = param;
++        property = property + "."+it->get<0>();
++      //  check the parameters which need to be replaced
++        if( m_Param2value.count(property)){
++           std::string value = m_Param2value[property];
++           double num_value = g4string2value(value);
++           props[it->get<0>()] = num_value; 
++           LogInfo<<"Note you will use your own parameter:"<<property<<"  value is "<<num_value<<std::endl;  
++        }
++        else{
++          props[it->get<0>()] = it->get<1>();
++        }
+     }
+ 
+     return st;
+ }
++
++ 
++const std::string MCParamsFileSvc::GetPath(const std::string &param ){
++  
++  namespace fs = boost::filesystem;
++//  check the parameters which need to be replaced 
++  if(m_Param2value.count(param)){
++       std::string path = m_Param2value[param];
++       fs::path file(path);
++       if (!fs::exists(file)) {
++            LogError << "Path " << file.string() << " does not exist." << std::endl;
++            return 0;
++        } 
++        const std::string path_c = path;
++        LogInfo<<"Note you will use your own parameters from the file:"<<path_c<<std::endl;
++        return path_c;
++    }
++
++
++  std::string base;
++  if(getenv("JUNOTOP")){
++        base = getenv("JUNOTOP");
++        base += "/data/Simulation/DetSim";
++    }
++  if (getenv("WORKTOP")) {
++        std::string worktop = getenv("WORKTOP");
++        worktop += "/data/Simulation/DetSim";
++        fs::path worktop_path(worktop);
++        if (fs::exists(worktop_path)) {
++          base = worktop;    
++        }
++
++    }
++  if(getenv("MCPARAMSROOT")){
++       base = getenv("MCPARAMSROOT");
++  }
++
++        fs::path fullp(base);
++        if (!fs::exists(fullp)) {
++            LogError << "Path: " << fullp.string() << " does not exists. " << std::endl;
++            LogError << "Check $MCPARAMSROOT or $JUNOTOP/data/Simulation/DetSim or $WORKTOP/data/Simulation/DetSim " << std::endl;
++            exit(0);
++            return 0;
++        }
++        else{
++            LogInfo<<"Optical parameters will be used from: "<<base<<std::endl;
++        }
++
++        // magic here, convert it to path
++        // + Material
++        //   + LS
++        //     + RINDEX - last one should be a file
++        boost::char_separator<char> sep(".");
++        typedef boost::tokenizer<boost::char_separator<char> > tokenizer;
++        tokenizer tok(param, sep);
++        for (tokenizer::iterator it = tok.begin(); it != tok.end(); ++it) {
++         std::string s = *it;
++         fs::path sub(s);
++         fullp /= sub;
++        }
++          
++        if (!fs::exists(fullp)) {
++            LogError << "Path " << fullp.string() << " does not exist." << std::endl;
++            return 0;
++        }
++        
++       const std::string path = fullp.string();
++       return path;
++}
++
++double MCParamsFileSvc::g4string2value(std::string value){
++    std::string::size_type position;
++    std::string::size_type position_1;
++    std::string::size_type position_2;
++    position_1 = value.find_first_of("*");
++    position_2 = value.find_first_of("/");
++    if ( position_1 <= position_2){
++      position = position_1;
++    }
++    else{
++      position = position_2;
++    }
++   std::string number_string = value.substr(0,position);
++   std::string unit_string = value.substr(position);
++   double num = std::stod(number_string);
++   with_units(num,unit_string);
++   return num;
++}
++
++
+Index: src/MCParamsFileSvc.hh
+===================================================================
+--- src/MCParamsFileSvc.hh	(revision 4713)
++++ src/MCParamsFileSvc.hh	(working copy)
+@@ -23,7 +23,13 @@
+         virtual bool Get(const std::string&, vec_d2d& props);
+         virtual bool Get(const std::string&, vec_s2d& props);
+         virtual bool Get(const std::string&, map_s2d& props); 
+- 
++    private:
++        std::map<std::string,std::string> m_Param2value;//this list contains the optical parameters which will be replaced;
++       // std::vector<std::string> m_OpticalParamFile;//this contains the corresponding file.
++    public:
++        //bool IsInParamList(const std::string param);
++        const std::string GetPath(const std::string & param);
++          double g4string2value(std::string value);
+ };
+       
+ #endif
+Index: src/utils.hh
+===================================================================
+--- src/utils.hh	(revision 4713)
++++ src/utils.hh	(working copy)
+@@ -65,70 +65,17 @@
+ 
+ // template function helper
+ template<typename T1, typename T2>
+-bool get_implv1(const std::string& param, 
++bool get_implv1(const std::string& path, 
+         std::vector< boost::tuple<T1, T2> >& props)
+ {
+     namespace fs = boost::filesystem;
+-    // PROTOTYPE
+-    std::string base;
+-    // search data in this order:
+-    //  * $MCPARAMSROOT
+-    //  * $JUNOTOP/data/Simulation/DetSim
+-    if (getenv("MCPARAMSROOT")) {
+-        base = getenv("MCPARAMSROOT");
+-        LogInfo<<"Optical parameters will be used from: "<<base<<std::endl;
+-    } else if (getenv("WORKTOP")) {
+-        base = getenv("WORKTOP");
+-        base += "/data/Simulation/DetSim";
+-        LogInfo<<"Optical parameters will be used from: "<<base<<std::endl;
+-    } else if (getenv("JUNOTOP")){
+-        base = getenv("JUNOTOP");
+-        base += "/data/Simulation/DetSim";
+-        LogInfo<<"Optical parameters will be used from: "<<base<<std::endl;
+-     } 
+-     else {
+-        LogError << "Can't locate the input data in:" << std::endl;
+-        LogError << " + $MCPARAMSROOT " << std::endl;
+-        LogError << " + $WORKTOP/data/Simulation/DetSim " << std::endl;
+-        LogError << " + $JUNOTOP/data/Simulation/DetSim " << std::endl;
+-        return false;
+-    }
++   
++    fs::path fullp(path);
++    
++    typename boost::tuple<T1, T2> elem;
+ 
+-        fs::path fullp(base);
+-        if (!fs::exists(fullp)) {
+-            LogError << "Path: " << fullp.string() << " does not exists. " << std::endl;
+-            LogError << "Check $MCPARAMSROOT or $JUNOTOP/data/Simulation/DetSim or $WORKTOP/data/Simulation/DetSim " << std::endl;
+-            exit(0);
+-            return false;
+-        }
+-
+-        // magic here, convert it to path
+-        // + Material
+-        //   + LS
+-        //     + RINDEX - last one should be a file
+-        boost::char_separator<char> sep(".");
+-        typedef boost::tokenizer<boost::char_separator<char> > tokenizer;
+-        tokenizer tok(param, sep);
+-        for (tokenizer::iterator it = tok.begin(); it != tok.end(); ++it) {
+-            // std::cout << *it << std::endl;
+-            std::string s = *it;
+-            // fullp/=fs::path(s);
+-            fs::path sub(s);
+-
+-            fullp /= sub;
+-        }
+-        // std::cout << fullp.string() << std::endl;
+-        // std::cout << "Exists or not: " << (fs::exists(fullp)) << std::endl;
+-        if (!fs::exists(fullp)) {
+-            LogError << "Path " << fullp.string() << " does not exist." << std::endl;
+-            return false;
+-        }
+-        // load the data into ntuple
+-        //
+-        typename boost::tuple<T1, T2> elem;
+-
+-        std::ifstream ifs(fullp.string().c_str());
+-        while (ifs.good()) {
++    std::ifstream ifs(fullp.string().c_str());
++    while (ifs.good()) {
+             std::string temp_line;
+             std::getline(ifs, temp_line);
+ 
